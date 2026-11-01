@@ -1,6 +1,6 @@
 # Copy to .env for local development. Never commit the real .env file.
 OPENAI_API_KEY=
 # Optional overrides
-# AI_MODEL=grok-4.7
+# AI_MODEL=gpt-4.1-mini
 # EMBEDDING_MODEL=text-embedding-3-small
-# AI_BASE_URL=https://api.x.ai/v1
+# AI_BASE_URL=https://api.openai.com/v1
