@@ -5,8 +5,12 @@ import type { Account, RagDocument } from "./types";
 
 const BATCH_SIZE = 40;
 const MAX_ATTEMPTS = 3;
+const PAUSE_MS = 60_000;
 
 type Vector = number[];
+
+// After an embeddings failure, skip embeddings for a while instead of retrying on every request.
+let embeddingsPausedUntil = 0;
 
 async function postEmbeddings(apiKey: string, input: string[]): Promise<Vector[]> {
   for (let attempt = 1; ; attempt++) {
@@ -24,10 +28,16 @@ async function postEmbeddings(apiKey: string, input: string[]): Promise<Vector[]
       await new Promise((r) => setTimeout(r, delay + Math.random() * 300));
       continue;
     }
-    const json = (await response.json()) as { data: { index: number; embedding: Vector }[] };
+    const json = (await response.json()) as { data: { index?: number; embedding: Vector }[] };
     const ordered: (Vector | undefined)[] = Array.from({ length: input.length });
-    for (const item of json.data) ordered[item.index] = item.embedding;
-    if (ordered.some((v) => !v?.length)) throw new Error("Embeddings response missing vectors");
+    // Some providers omit `index`; fall back to the item's position in the response.
+    json.data?.forEach((item, i) => {
+      ordered[item.index ?? i] = item.embedding;
+    });
+    if (ordered.some((v) => !v?.length)) {
+      console.error("Embeddings response shape:", JSON.stringify(json).slice(0, 500));
+      throw new Error("Embeddings response missing vectors");
+    }
     return ordered as Vector[];
   }
 }
@@ -77,11 +87,13 @@ export async function semanticScores(
 ): Promise<Map<string, number>[] | null> {
   const apiKey = getAiApiKey();
   if (!apiKey || queries.length === 0) return null;
+  if (Date.now() < embeddingsPausedUntil) return null;
   try {
     const [vectors, queryVectors] = await Promise.all([docVectors(apiKey, docs, accounts), embedAll(apiKey, queries)]);
     return queryVectors.map((q) => new Map(Array.from(vectors, ([id, v]) => [id, dot(q, v)])));
   } catch (error) {
     console.error("Semantic search unavailable, using keyword ranking only:", error);
+    embeddingsPausedUntil = Date.now() + PAUSE_MS;
     return null;
   }
 }
