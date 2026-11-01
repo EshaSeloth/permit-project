@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { NoObjectGeneratedError, Output, streamText } from "ai";
 import { z } from "zod";
-
+ 
 import documents from "../../server-data/documents.json";
 import { canAccess } from "./access";
 import { ACCOUNTS, EVAL_QUESTIONS, USERS } from "./dataset";
@@ -9,10 +9,10 @@ import { AI_BASE_URL, AI_MODEL, getAiApiKey } from "./gateway.server";
 import { semanticScores } from "./embeddings.server";
 import { createRetriever } from "./retrieve";
 import type { AskResult, RagDocument, RagUser, RetrievalReport, RetrievedDoc } from "./types";
-
+ 
 const DOCS = documents as RagDocument[];
 const retriever = createRetriever(DOCS, ACCOUNTS);
-
+ 
 export class RagError extends Error {
   constructor(
     message: string,
@@ -21,23 +21,23 @@ export class RagError extends Error {
     super(message);
   }
 }
-
+ 
 export function getUser(username: string): RagUser {
   const user = USERS.find((u) => u.username === username);
   if (!user) throw new RagError("Unknown user", 400);
   return user;
 }
-
+ 
 const answerSchema = z.object({
   answer: z.string(),
   citations: z.array(z.string()),
   refused: z.boolean(),
   conflictNoted: z.boolean(),
 });
-
+ 
 const INSTRUCTIONS = `You are a permission-aware knowledge assistant for a subscription-billing company.
 Answer ONLY from the SOURCES provided. They are the only documents this user is authorized to read.
-
+ 
 Rules:
 - Cite every factual claim inline with the source ID in square brackets, e.g. [TKT-1001]. List all cited IDs in "citations".
 - Never cite or mention an ID that is not in SOURCES.
@@ -48,7 +48,7 @@ Rules:
 - Prefer current policies. Sources marked as superseded are never provided; do not invent older versions.
 - If any cited source is L2 (Confidential), end with a short reminder not to share it externally.
 - Be concise: 2 to 6 sentences, plain business language, no headings.`;
-
+ 
 function formatSources(docs: RagDocument[]): string {
   return docs
     .map(
@@ -57,7 +57,7 @@ function formatSources(docs: RagDocument[]): string {
     )
     .join("\n\n");
 }
-
+ 
 function toRetrievedDoc(doc: RagDocument, score: number): RetrievedDoc {
   return {
     docId: doc.doc_id,
@@ -70,7 +70,7 @@ function toRetrievedDoc(doc: RagDocument, score: number): RetrievedDoc {
     content: doc.content,
   };
 }
-
+ 
 export async function answerQuestion(username: string, question: string): Promise<AskResult> {
   const user = getUser(username);
   // Meaning-based similarity for the reranker; falls back to keyword-only ranking if unavailable.
@@ -80,7 +80,7 @@ export async function answerQuestion(username: string, question: string): Promis
   const allowed = hits.filter((h) => canAccess(user, h.doc));
   const retrieved = allowed.map((h) => toRetrievedDoc(h.doc, h.score));
   const accessibleDocCount = retriever.accessibleCount(user);
-
+ 
   if (allowed.length === 0) {
     return {
       answer: "I can't find anything about this in the documents available to you.",
@@ -92,19 +92,19 @@ export async function answerQuestion(username: string, question: string): Promis
       accessibleDocCount,
     };
   }
-
+ 
   const apiKey = getAiApiKey();
   if (!apiKey) throw new RagError("AI is not configured. Set OPENAI_API_KEY on the server.", 500);
-
+ 
   const provider = createOpenAI({ baseURL: AI_BASE_URL, apiKey });
-
+ 
   const result = streamText({
     model: provider.responses(AI_MODEL),
     instructions: INSTRUCTIONS,
     prompt: `User role: ${user.role}\nQuestion: ${question}\n\nSOURCES:\n${formatSources(allowed.map((h) => h.doc))}`,
     output: Output.object({ schema: answerSchema }),
   });
-
+ 
   let parsed: z.infer<typeof answerSchema>;
   try {
     parsed = await result.output;
@@ -113,18 +113,21 @@ export async function answerQuestion(username: string, question: string): Promis
       throw new RagError("The AI returned an unreadable answer. Please try again.", 502);
     }
     const status = (error as { statusCode?: number }).statusCode;
+    // Log the real provider error so it shows up in Vercel's runtime logs.
+    console.error("AI provider error:", { status, model: AI_MODEL, baseURL: AI_BASE_URL, error });
+    if (status === 401) throw new RagError("The AI provider rejected the API key. Check OPENAI_API_KEY and redeploy.", 401);
     if (status === 402) throw new RagError("The AI provider quota is used up. Check billing on your provider account.", 402);
     if (status === 429) throw new RagError("Too many requests right now. Please wait a moment and retry.", 429);
     if (status === 403) throw new RagError("The AI provider rejected the request. Check the API key and its permissions.", 403);
     throw new RagError("The AI service failed to answer. Please try again.", status ?? 500);
   }
-
+ 
   // Strip any citation the model produced that was not in the authorized context.
   const allowedIds = new Set(allowed.map((h) => h.doc.doc_id));
   const inlineIds = Array.from(parsed.answer.matchAll(/\[([A-Z]{2,5}-\d{1,4})\]/g)).map((m) => m[1] ?? "");
   const citations = Array.from(new Set([...parsed.citations, ...inlineIds])).filter((id) => allowedIds.has(id));
   const confidential = allowed.some((h) => citations.includes(h.doc.doc_id) && h.doc.access_level === "L2");
-
+ 
   return {
     answer: parsed.answer,
     citations,
@@ -135,7 +138,7 @@ export async function answerQuestion(username: string, question: string): Promis
     accessibleDocCount,
   };
 }
-
+ 
 /** Runs retrieval (no AI answers) for every question as every user and reports leaks. */
 export async function runRetrievalReport(): Promise<RetrievalReport> {
   const semantic = await semanticScores(EVAL_QUESTIONS.map((q) => q.question), DOCS, ACCOUNTS);
