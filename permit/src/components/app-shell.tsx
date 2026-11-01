@@ -26,9 +26,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="flex h-screen overflow-hidden bg-background">
       <aside className={isPhone ? "w-14 shrink-0 border-r border-border bg-sidebar" : "w-60 shrink-0 border-r border-border bg-sidebar"}>
         {!isPhone && (
-          <div className="overflow-hidden whitespace-nowrap px-4 pb-2 pt-4">
+          <div className="px-4 pb-2 pt-4">
             <p className="text-base font-bold text-foreground">PERMIT</p>
-            <p className="text-xs text-muted-foreground">Permission-aware knowledge base system</p>
+            <p className="text-xs leading-snug text-muted-foreground">Permission-aware knowledge base system</p>
           </div>
         )}
         <nav aria-label="Main" className="space-y-1 p-2">
