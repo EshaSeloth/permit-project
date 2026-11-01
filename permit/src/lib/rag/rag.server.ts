@@ -99,7 +99,8 @@ export async function answerQuestion(username: string, question: string): Promis
   const provider = createOpenAI({ baseURL: AI_BASE_URL, apiKey });
  
   const result = streamText({
-    model: provider.responses(AI_MODEL),
+    // Chat Completions works on OpenAI and on OpenAI-compatible providers such as Gemini and xAI.
+    model: provider.chat(AI_MODEL),
     instructions: INSTRUCTIONS,
     prompt: `User role: ${user.role}\nQuestion: ${question}\n\nSOURCES:\n${formatSources(allowed.map((h) => h.doc))}`,
     output: Output.object({ schema: answerSchema }),
@@ -119,7 +120,9 @@ export async function answerQuestion(username: string, question: string): Promis
     if (status === 402) throw new RagError("The AI provider quota is used up. Check billing on your provider account.", 402);
     if (status === 429) throw new RagError("Too many requests right now. Please wait a moment and retry.", 429);
     if (status === 403) throw new RagError("The AI provider rejected the request. Check the API key and its permissions.", 403);
-    throw new RagError("The AI service failed to answer. Please try again.", status ?? 500);
+    // TEMPORARY debugging: show the provider's real message on screen. Remove once fixed.
+    const detail = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    throw new RagError(`The AI service failed to answer (status ${status ?? "none"}): ${detail}`, status ?? 500);
   }
  
   // Strip any citation the model produced that was not in the authorized context.
