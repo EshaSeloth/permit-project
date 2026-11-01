@@ -1,14 +1,19 @@
-// Server-only meaning-based (semantic) similarity via embeddings from the configured AI provider.
-// Document vectors are computed once per server instance and cached in memory.
-import { AI_BASE_URL, EMBEDDING_MODEL, getAiApiKey } from "./gateway.server";
+// Server-only meaning-based (semantic) similarity via embeddings.
+// Embeddings are optional: they only run if EMBEDDING_BASE_URL and EMBEDDING_API_KEY are both set.
+// Claude has no embeddings model, so with only a Claude key this module returns null
+// and the retriever falls back to keyword-only ranking.
+import { EMBEDDING_MODEL } from "./gateway.server";
 import type { Account, RagDocument } from "./types";
 
 const BATCH_SIZE = 20;
-const CONCURRENCY = 3;
+const CONCURRENCY = 2;
 const MAX_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 20_000;
-const PAUSE_MS = 30_000;
+const PAUSE_MS = 60_000;
 const QUERY_CACHE_LIMIT = 200;
+
+const EMBED_BASE_URL = (process.env.EMBEDDING_BASE_URL ?? "").replace(/\/+$/, "");
+const EMBED_KEY = process.env.EMBEDDING_API_KEY ?? "";
 
 type Vector = number[];
 type EmbeddingsResponse = {
@@ -16,31 +21,18 @@ type EmbeddingsResponse = {
   error?: unknown;
 };
 
-// Optional pool of keys (each from a separate Google project). Falls back to the single configured key.
-const API_KEYS = (process.env.GEMINI_API_KEYS ?? "")
-  .split(",")
-  .map((k) => k.trim())
-  .filter(Boolean);
-let keyCursor = 0;
-function pickKey(fallback: string): string {
-  if (API_KEYS.length === 0) return fallback;
-  return API_KEYS[keyCursor++ % API_KEYS.length]!;
-}
-
 // After an embeddings failure, skip embeddings briefly instead of retrying on every request.
 let embeddingsPausedUntil = 0;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function postEmbeddings(firstKey: string, input: string[]): Promise<Vector[]> {
+async function postEmbeddings(input: string[]): Promise<Vector[]> {
   for (let attempt = 1; ; attempt++) {
-    // On a retry, switch to the next key in the pool.
-    const key = attempt === 1 ? firstKey : pickKey(firstKey);
     let response: Response;
     try {
-      response = await fetch(`${AI_BASE_URL}/embeddings`, {
+      response = await fetch(`${EMBED_BASE_URL}/embeddings`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${EMBED_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify({ model: EMBEDDING_MODEL, input }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -56,10 +48,8 @@ async function postEmbeddings(firstKey: string, input: string[]): Promise<Vector
         throw new Error(`Embeddings failed: ${response.status} ${await response.text()}`);
       }
       await response.body?.cancel();
-      // With multiple keys, a different key can go right away; with one key, honor Retry-After.
       const retryAfter = Number(response.headers.get("Retry-After"));
-      const delay =
-        API_KEYS.length > 1 ? 300 : retryAfter > 0 ? Math.min(retryAfter, 10) * 1000 : 500 * 2 ** attempt;
+      const delay = retryAfter > 0 ? Math.min(retryAfter, 10) * 1000 : 500 * 2 ** attempt;
       await sleep(delay + Math.random() * 300);
       continue;
     }
@@ -100,8 +90,8 @@ function dot(a: Vector, b: Vector): number {
   return s;
 }
 
-/** Embeds all texts, sending up to CONCURRENCY batches at a time, rotating keys per batch. */
-async function embedAll(fallbackKey: string, texts: string[]): Promise<Vector[]> {
+/** Embeds all texts, sending up to CONCURRENCY batches at a time. Output order matches input order. */
+async function embedAll(texts: string[]): Promise<Vector[]> {
   const batches: string[][] = [];
   for (let i = 0; i < texts.length; i += BATCH_SIZE) batches.push(texts.slice(i, i + BATCH_SIZE));
 
@@ -111,7 +101,7 @@ async function embedAll(fallbackKey: string, texts: string[]): Promise<Vector[]>
     while (true) {
       const i = next++;
       if (i >= batches.length) return;
-      results[i] = await postEmbeddings(pickKey(fallbackKey), batches[i]!);
+      results[i] = await postEmbeddings(batches[i]!);
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker));
@@ -121,10 +111,10 @@ async function embedAll(fallbackKey: string, texts: string[]): Promise<Vector[]>
 // Small in-memory cache so repeated queries (e.g. during evals) are not re-embedded.
 const queryCache = new Map<string, Vector>();
 
-async function embedQueries(apiKey: string, queries: string[]): Promise<Vector[]> {
+async function embedQueries(queries: string[]): Promise<Vector[]> {
   const missing = Array.from(new Set(queries.filter((q) => !queryCache.has(q))));
   if (missing.length > 0) {
-    const vectors = await embedAll(apiKey, missing);
+    const vectors = await embedAll(missing);
     missing.forEach((q, i) => {
       if (queryCache.size >= QUERY_CACHE_LIMIT) {
         const oldest = queryCache.keys().next().value;
@@ -138,11 +128,11 @@ async function embedQueries(apiKey: string, queries: string[]): Promise<Vector[]
 
 let docVectorsPromise: Promise<Map<string, Vector>> | null = null;
 
-function docVectors(apiKey: string, docs: RagDocument[], accounts: Account[]): Promise<Map<string, Vector>> {
+function docVectors(docs: RagDocument[], accounts: Account[]): Promise<Map<string, Vector>> {
   if (!docVectorsPromise) {
     const names = new Map(accounts.map((a) => [a.id, a.name]));
     const texts = docs.map((d) => `${d.title}\nCustomer: ${names.get(d.account_id) ?? "All customers"}\n${d.content}`);
-    docVectorsPromise = embedAll(apiKey, texts)
+    docVectorsPromise = embedAll(texts)
       .then((vectors) => new Map(docs.map((d, i) => [d.doc_id, vectors[i] ?? []])))
       .catch((error) => {
         docVectorsPromise = null; // allow a later request to try again
@@ -154,22 +144,19 @@ function docVectors(apiKey: string, docs: RagDocument[], accounts: Account[]): P
 
 /**
  * Cosine similarity of each query to every document (doc ID -> similarity).
- * Returns null when embeddings are unavailable so callers fall back to keyword-only ranking.
- * Similarities are computed for all documents; permission filtering still happens in the retriever.
+ * Returns null when embeddings are unavailable or not configured, so callers fall back
+ * to keyword-only ranking. Permission filtering still happens in the retriever.
  */
 export async function semanticScores(
   queries: string[],
   docs: RagDocument[],
   accounts: Account[],
 ): Promise<Map<string, number>[] | null> {
-  const apiKey = getAiApiKey() || "";
-  if ((!apiKey && API_KEYS.length === 0) || queries.length === 0) return null;
+  // Not configured (e.g. only a Claude key): skip silently, no network calls, no errors.
+  if (!EMBED_BASE_URL || !EMBED_KEY || queries.length === 0) return null;
   if (Date.now() < embeddingsPausedUntil) return null;
   try {
-    const [vectors, queryVectors] = await Promise.all([
-      docVectors(apiKey, docs, accounts),
-      embedQueries(apiKey, queries),
-    ]);
+    const [vectors, queryVectors] = await Promise.all([docVectors(docs, accounts), embedQueries(queries)]);
     return queryVectors.map((q) => new Map(Array.from(vectors, ([id, v]) => [id, dot(q, v)])));
   } catch (error) {
     console.error("Semantic search unavailable, using keyword ranking only:", error);
