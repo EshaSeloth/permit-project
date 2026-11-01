@@ -1,6 +1,6 @@
 # Copy to .env for local development. Never commit the real .env file.
 OPENAI_API_KEY=
 # Optional overrides
-# AI_MODEL=gpt-4.1-mini
-# EMBEDDING_MODEL=text-embedding-3-small
-# AI_BASE_URL=https://api.openai.com/v1
+# AI_MODEL=gemini-3.8-flash
+# EMBEDDING_MODEL=gemini-embedding-001
+# AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
