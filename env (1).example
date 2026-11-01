@@ -1,8 +1,6 @@
-# Copy to .env for local development. Never commit the real .env file.
-OPENAI_API_KEY=
-# Optional: several Gemini keys, each from a separate Google project, comma-separated (key1,key2,key3)
-GEMINI_API_KEYS=
-# Optional overrides
-# AI_MODEL=gemini-3.8-flash
-# EMBEDDING_MODEL=gemini-embedding-001
-# AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+OPENAI_API_KEY=your-claude-key
+AI_BASE_URL=https://api.anthropic.com/v1/
+AI_MODEL=claude-haiku-5-5
+EMBEDDING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+EMBEDDING_API_KEY=your-one-gemini-key
+EMBEDDING_MODEL=gemini-embedding-001
