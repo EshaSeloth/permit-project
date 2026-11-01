@@ -16,23 +16,35 @@ type EmbeddingsResponse = {
   error?: unknown;
 };
 
+// Optional pool of keys (each from a separate Google project). Falls back to the single configured key.
+const API_KEYS = (process.env.GEMINI_API_KEYS ?? "")
+  .split(",")
+  .map((k) => k.trim())
+  .filter(Boolean);
+let keyCursor = 0;
+function pickKey(fallback: string): string {
+  if (API_KEYS.length === 0) return fallback;
+  return API_KEYS[keyCursor++ % API_KEYS.length]!;
+}
+
 // After an embeddings failure, skip embeddings briefly instead of retrying on every request.
 let embeddingsPausedUntil = 0;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function postEmbeddings(apiKey: string, input: string[]): Promise<Vector[]> {
+async function postEmbeddings(firstKey: string, input: string[]): Promise<Vector[]> {
   for (let attempt = 1; ; attempt++) {
+    // On a retry, switch to the next key in the pool.
+    const key = attempt === 1 ? firstKey : pickKey(firstKey);
     let response: Response;
     try {
       response = await fetch(`${AI_BASE_URL}/embeddings`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
         body: JSON.stringify({ model: EMBEDDING_MODEL, input }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
-      // Network error or timeout: retry a couple of times, then give up.
       if (attempt >= MAX_ATTEMPTS) throw error;
       await sleep(500 * 2 ** attempt + Math.random() * 300);
       continue;
@@ -44,8 +56,10 @@ async function postEmbeddings(apiKey: string, input: string[]): Promise<Vector[]
         throw new Error(`Embeddings failed: ${response.status} ${await response.text()}`);
       }
       await response.body?.cancel();
+      // With multiple keys, a different key can go right away; with one key, honor Retry-After.
       const retryAfter = Number(response.headers.get("Retry-After"));
-      const delay = retryAfter > 0 ? Math.min(retryAfter, 10) * 1000 : 500 * 2 ** attempt;
+      const delay =
+        API_KEYS.length > 1 ? 300 : retryAfter > 0 ? Math.min(retryAfter, 10) * 1000 : 500 * 2 ** attempt;
       await sleep(delay + Math.random() * 300);
       continue;
     }
@@ -86,8 +100,8 @@ function dot(a: Vector, b: Vector): number {
   return s;
 }
 
-/** Embeds all texts, sending up to CONCURRENCY batches at a time. Output order matches input order. */
-async function embedAll(apiKey: string, texts: string[]): Promise<Vector[]> {
+/** Embeds all texts, sending up to CONCURRENCY batches at a time, rotating keys per batch. */
+async function embedAll(fallbackKey: string, texts: string[]): Promise<Vector[]> {
   const batches: string[][] = [];
   for (let i = 0; i < texts.length; i += BATCH_SIZE) batches.push(texts.slice(i, i + BATCH_SIZE));
 
@@ -97,7 +111,7 @@ async function embedAll(apiKey: string, texts: string[]): Promise<Vector[]> {
     while (true) {
       const i = next++;
       if (i >= batches.length) return;
-      results[i] = await postEmbeddings(apiKey, batches[i]!);
+      results[i] = await postEmbeddings(pickKey(fallbackKey), batches[i]!);
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker));
@@ -148,8 +162,8 @@ export async function semanticScores(
   docs: RagDocument[],
   accounts: Account[],
 ): Promise<Map<string, number>[] | null> {
-  const apiKey = getAiApiKey();
-  if (!apiKey || queries.length === 0) return null;
+  const apiKey = getAiApiKey() || "";
+  if ((!apiKey && API_KEYS.length === 0) || queries.length === 0) return null;
   if (Date.now() < embeddingsPausedUntil) return null;
   try {
     const [vectors, queryVectors] = await Promise.all([
